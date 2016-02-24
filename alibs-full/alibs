@@ -1,0 +1,290 @@
+#!/bin/bash
+#ALiBS version 1.03
+set -o errexit
+set -o nounset
+app=$0
+app_path=${app%/*}
+echo "app_path:$app_path"
+PATH="$app_path/bin/:$app_path/bowtie2-2.2.1/:$app_path/bwa-0.6.2/:$PATH"
+#pick reads
+pick(){
+    if [ "$#" -ne "3" ]
+    then
+        echo "Usage:pick <out_bt2.sam> <one_line_sorted.fq> <picked.tmp> "
+        exit 1
+    fi
+    cat $1|cut -f 1,4,12- | grep -E '^[^[:blank:]]*[[:blank:]]0[[:blank:]]|XS' |cut -f 1|LC_ALL=C sort|sed 's/^/@&/g' |LC_ALL=C join -t $'\t' - $2|tr '\t' '\n' >$3 
+    return 0
+}
+fapick(){
+    if [ "$#" -ne "3" ]
+    then
+        echo "Usage:fapick <out_bt2.sam> <one_line_sorted.fa> <picked.tmp> "
+        exit 1
+    fi
+    cat $1|cut -f 1,4,12- | grep -E '^[^[:blank:]]*[[:blank:]]0[[:blank:]]|XS' |cut -f 1|LC_ALL=C sort|sed 's/^/>&/g' |LC_ALL=C join -t $'\t' - $2|fa_from_oneline.sh >$3 
+    return 0
+}
+
+trim_bt2opt(){
+    echo $1|sed "s/^bt2opt:://g"
+}
+trim_bwaopt(){
+    echo $1|sed "s/^bwaopt:://g"
+}
+usage(){
+    echo "Usage:ALiBS index -X <ref.fa>             //build bisulfite index"
+    echo "     :ALiBS -X <ref.fa> -U <SE_reads.fq> -O <aln.sam>//mapping single-end FASTQ bisulfite reads"
+    echo "     :ALiBS -X <ref.fa> -1 <PE_reads1.fq> -2 <PE_reads2.fq> -O <aln.sam>//mapping paired-end FASTQ bisulfite reads"
+    echo "     :ALiBS -X <ref.fa> -U <SE_reads.fq> -O <aln.sam> -A//mapping single-end FASTA bisulfite reads"
+    echo "     :ALiBS -X <ref.fa> -1 <PE_reads1.fq> -2 <PE_reads2.fq> -A -O <aln.sam>//mapping paired-end FASTA bisulfite reads"
+    exit 1
+}
+
+if [ "$#" -eq 0 ]
+then
+    usage
+fi
+
+index=
+ref=
+SE_reads=
+F=
+outfile=
+A=
+SE=
+PE_reads1=
+PE_reads2=
+usebt2=true
+usebwa=true
+bt2opt=
+bwaopt=
+while [ "$#" -gt "0" ]
+do
+    case $1 in
+    bt2opt::*)
+        bt2opt=$bt2opt" "$(trim_bt2opt "$1")" "
+        ;;
+    bwaopt::*)
+        bwaopt=$bwaopt" "$(trim_bwaopt "$1")" "
+        ;;
+    index)
+        index=true
+        ;;
+    -X)
+        shift
+        ref=$1
+        ;;
+    -U)
+        SE=true
+        shift
+        SE_reads=$1
+        ;;
+    -1)
+        shift
+        PE_reads1=$1
+        ;;
+    -2)
+        shift
+        PE_reads2=$1
+        ;;
+    -O)
+        shift
+        outfile=$1
+        ;;
+    -F)
+        F=true
+        ;;
+    -A)
+        A=true
+        ;;
+    --no-bowtie2)
+        usebt2=false
+        ;;
+    --no-bwa)
+        usebwa=false
+        ;;
+    *)
+        echo "Error:unexceptive argument:$1"
+        usage
+        ;;
+    esac
+    shift
+done
+
+if ! [ -f "$ref" ]
+then
+    echo "Error:$ref is not a filename."
+    usage
+fi
+ref_path=${ref%/*}
+ref_name=${ref##*/}
+if [ "$index" = "true" ] #build index
+then    
+         #build bisulfite index
+        echo "use cmd: " >&2
+        if [ "$usebt2" = "true" ];then
+            echo -e "\tbowtie2-build -f <FILE> <BASE NAME> $bt2opt"
+        fi
+        if [ "$usebwa" = "true" ];then
+            echo -e "\tbwa index -a bwtsw <FILE> $bwaopt"
+        fi
+        echo "1" > index_progress
+        awk '$1~/^>/ {print} $1 !~ /^>/ {gsub("C","T",$1);print}' $ref > "1_double_$ref_name"
+        echo "16" > index_progress
+        awk '$1~/^>/ {print} $1 !~ /^>/ {gsub("G","A",$1);print}' $ref > "2_double_$ref_name"
+        if [ "$usebt2" = "true" ];then
+            echo "33" > index_progress
+            bowtie2-build -f "1_double_$ref_name" "1_double_bt2_base_$ref_name" #>/dev/null 2>&1
+            echo "50" > index_progress
+            bowtie2-build -f "2_double_$ref_name" "2_double_bt2_base_$ref_name" #>/dev/null 2>&1
+            echo "67" > index_progress
+        fi
+        if [ "$usebwa" = "true" ];then
+            cat "1_double_$ref_name" "2_double_$ref_name" > "double_$ref_name"
+            echo "84" > index_progress
+            bwa index -a bwtsw "double_$ref_name"
+            echo "99" > index_progress
+            touch "${ref_name}_indexed"
+        fi
+        echo "100" > index_progress
+else # do mapping
+    if  [ "$PE_reads1" != "" ] && [ "$PE_reads1" != "" ] || [ "$SE_reads" != "" ] 
+    then
+        
+             # do bisulfite mapping
+             if [ "$SE" = "true" ] && [ -f "$SE_reads" ] # single-end
+             then
+             SE_reads_path=${SE_reads%/*}
+             SE_reads_name=${SE_reads##*/}
+                if [ "$A" = "true" ]
+                then #FASTA reads
+                    echo "Doing single-end FASTA BSF Mapping"
+                    echo "1" > map_progress
+                    awk '$1!~/^>/ {gsub("C","T",$0);print $0} $1~/^>/ {print}' "$SE_reads"> "C2T_$SE_reads_name"
+                    awk '$1!~/^>/ {gsub("G","A",$0);print $0} $1~/^>/ {print}' "$SE_reads"> "G2A_$SE_reads_name"
+                    if [ "$usebt2" = "true" ];then
+                        bowtie2 $bt2opt -f -x "1_double_bt2_base_$ref_name" -U "C2T_$SE_reads_name" -S "1_out_bt2_C2T_$SE_reads_name.sam"
+                        bowtie2 $bt2opt -f -x "1_double_bt2_base_$ref_name" -U "G2A_$SE_reads_name" -S "1_out_bt2_G2A_$SE_reads_name.sam"
+                        echo "25" > map_progress
+                        bowtie2 $bt2opt -f -x "2_double_bt2_base_$ref_name" -U "C2T_$SE_reads_name" -S "2_out_bt2_C2T_$SE_reads_name.sam"
+                        bowtie2 $bt2opt -f -x "2_double_bt2_base_$ref_name" -U "G2A_$SE_reads_name" -S "2_out_bt2_G2A_$SE_reads_name.sam"
+                        echo "50" > map_progress
+                        cat "1_out_bt2_C2T_$SE_reads_name.sam" "1_out_bt2_G2A_$SE_reads_name.sam" "2_out_bt2_C2T_$SE_reads_name.sam" "2_out_bt2_G2A_$SE_reads_name.sam"|LC_ALL=C sort -k1,1 -k4,4 -u |awk '$2 != 4' >"out_bsf_$SE_reads_name.sam"
+                        fa_to_oneline.sh <$SE_reads |LC_ALL=C sort > one_line_reads.read
+                        fa_from_oneline.sh <one_line_reads.read >sorted_reads.fq
+                        fa_bsf_pick "one_line_reads.read" "out_bsf_$SE_reads_name.sam" "picked.fa" #TODO
+                        awk '$0!~/^>/ {gsub("C","T",$0);print $0} $0~/^>/ {print}' "picked.fa"> "2_C2T_$SE_reads_name"
+                        awk '$0!~/^>/ {gsub("G","A",$0);print $0} $0~/^>/ {print}' "picked.fa"> "2_G2A_$SE_reads_name"
+                        echo "75" > map_progress
+                    else
+                        rm -f "2_C2T_$SE_reads_name"
+                        rm -f "2_G2A_$SE_reads_name"
+                        cp -l "C2T_$SE_reads_name" "2_C2T_$SE_reads_name"
+                        cp -l "G2A_$SE_reads_name" "2_G2A_$SE_reads_name"
+                    fi
+                    bwa bwasw $bwaopt "double_$ref_name" "2_C2T_$SE_reads_name" >>"out_bsf_$SE_reads_name.sam"
+                    bwa bwasw $bwaopt "double_$ref_name" "2_G2A_$SE_reads_name" >>"out_bsf_$SE_reads_name.sam"
+                    echo "99" > map_progress
+                    LC_ALL=C sort -k1,1 -k4,4 -u "out_bsf_$SE_reads_name.sam" -o "out_bsf_$SE_reads_name.sam"
+                else #FASTQ reads
+                    echo "Doing single-end FASTQ BSF Mapping"
+                    echo "1" > map_progress
+                    awk 'FNR%4==2 {gsub("C","T",$0);print $0} FNR%4!=2' "$SE_reads"> "C2T_$SE_reads_name"
+                    awk 'FNR%4==2 {gsub("G","A",$0);print $0} FNR%4!=2' "$SE_reads"> "G2A_$SE_reads_name"
+                    if [ "$usebt2" = "true" ];then
+                        bowtie2 $bt2opt -q -x "1_double_bt2_base_$ref_name" -U "C2T_$SE_reads_name" -S "1_out_bt2_C2T_$SE_reads_name.sam"
+                        bowtie2 $bt2opt -q -x "1_double_bt2_base_$ref_name" -U "G2A_$SE_reads_name" -S "1_out_bt2_G2A_$SE_reads_name.sam"
+                        echo "25" > map_progress
+                        bowtie2 $bt2opt -q -x "2_double_bt2_base_$ref_name" -U "C2T_$SE_reads_name" -S "2_out_bt2_C2T_$SE_reads_name.sam"
+                        bowtie2 $bt2opt -q -x "2_double_bt2_base_$ref_name" -U "G2A_$SE_reads_name" -S "2_out_bt2_G2A_$SE_reads_name.sam"
+                        echo "50" > map_progress
+                        cat "1_out_bt2_C2T_$SE_reads_name.sam" "1_out_bt2_G2A_$SE_reads_name.sam" "2_out_bt2_C2T_$SE_reads_name.sam" "2_out_bt2_G2A_$SE_reads_name.sam" |LC_ALL=C sort -k1,1 -k4,4 -u |awk '$2 != 4' >"out_bsf_$SE_reads_name.sam"
+                        reads_to_one_line_reads.sh <$SE_reads |LC_ALL=C sort > one_line_reads.read
+                        one_line_reads_to_reads.sh <one_line_reads.read >sorted_reads.fq
+                        bsf_pick "sorted_reads.fq" "out_bsf_$SE_reads_name.sam" "picked.fq"
+                        awk 'FNR%4==2 {gsub("C","T",$0);print $0} FNR%4!=2' "picked.fq"> "2_C2T_$SE_reads_name"
+                        awk 'FNR%4==2 {gsub("G","A",$0);print $0} FNR%4!=2' "picked.fq"> "2_G2A_$SE_reads_name"
+                    else
+                        rm -f "2_C2T_$SE_reads_name"
+                        rm -f "2_G2A_$SE_reads_name"
+                        cp -l "C2T_$SE_reads_name" "2_C2T_$SE_reads_name"
+                        cp -l "G2A_$SE_reads_name" "2_G2A_$SE_reads_name"
+                    fi
+                    echo "75" > map_progress
+                    if [ "$usebwa" = "true" ];then
+                        bwa bwasw $bwaopt "double_$ref_name" "2_C2T_$SE_reads_name" >>"out_bsf_$SE_reads_name.sam"
+                        bwa bwasw $bwaopt "double_$ref_name" "2_G2A_$SE_reads_name" >>"out_bsf_$SE_reads_name.sam"
+                    fi
+                    echo "99" > map_progress
+                    LC_ALL=C sort -k1,1 -k4,4 -u "out_bsf_$SE_reads_name.sam" -o "out_bsf_$SE_reads_name.sam"
+                fi   
+
+                if [ "$F" = "true" ]
+                then
+                    cut -f 1,2 one_line_reads.read|cut -c 2- > "SEQ.tmp"
+                    LC_ALL=C join "SEQ.tmp" "out_bsf_$SE_reads_name.sam" -t $'\t' -a2 > "joined.sam"
+                    awk 'BEGIN {FS=OFS="\t"}{$11=$2;$2="";print}' "joined.sam"|sed 's/\t\t/\t/g'|LC_ALL=C sort -k1,1 -k4,4 -u > "seq_modified.sam"
+                    LCS "$ref" "seq_modified.sam"
+                    mv "modified.seq_modified.sam" "$outfile"
+                else
+                    mv "out_bsf_$SE_reads_name.sam" "$outfile"
+                fi
+                echo "100" > map_progress
+            else # paired-end
+                PE_reads1_path=${PE_reads1%/*}
+                PE_reads1_name=${PE_reads1##*/}
+                PE_reads2_path=${PE_reads2%/*}
+                PE_reads2_name=${PE_reads2##*/}
+                PE_reads_name="$PE_reads1_name""_""$PE_reads2_name"
+                echo "PE_reads_name: $PE_reads_name" >&2
+                if [ "$A" = "true" ]
+                then #FASTA reads
+                    echo "Doing paired-end FASTA BSF Mapping"
+                    echo "1" > map_progress
+                    awk '$1!~/^>/ {gsub("C","T",$0);print $0} $1~/^>/ {print}' "$PE_reads1"> "C2T_$PE_reads1_name"
+                    awk '$1!~/^>/ {gsub("G","A",$0);print $0} $1~/^>/ {print}' "$PE_reads1"> "G2A_$PE_reads1_name"
+                    awk '$1!~/^>/ {gsub("C","T",$0);print $0} $1~/^>/ {print}' "$PE_reads2"> "C2T_$PE_reads2_name"
+                    awk '$1!~/^>/ {gsub("G","A",$0);print $0} $1~/^>/ {print}' "$PE_reads2"> "G2A_$PE_reads2_name"
+                    bowtie2 $bt2opt -f -x "1_double_bt2_base_$ref_name" -1 "C2T_$PE_reads1_name" -2 "G2A_$PE_reads2_name" -S "1_out_bt2_C2T_$PE_reads_name.sam"
+                    bowtie2 $bt2opt -f -x "1_double_bt2_base_$ref_name" -1 "G2A_$PE_reads1_name" -2 "C2T_$PE_reads2_name" -S "1_out_bt2_G2A_$PE_reads_name.sam"
+                    echo "50" > map_progress
+                    bowtie2 $bt2opt -f -x "2_double_bt2_base_$ref_name" -1 "C2T_$PE_reads1_name" -2 "G2A_$PE_reads2_name" -S "2_out_bt2_C2T_$PE_reads_name.sam"
+                    bowtie2 $bt2opt -f -x "2_double_bt2_base_$ref_name" -1 "G2A_$PE_reads1_name" -2 "C2T_$PE_reads2_name" -S "2_out_bt2_G2A_$PE_reads_name.sam"
+                    cat "1_out_bt2_C2T_$PE_reads_name.sam" "1_out_bt2_G2A_$PE_reads_name.sam" "2_out_bt2_C2T_$PE_reads_name.sam" "2_out_bt2_G2A_$PE_reads_name.sam"|LC_ALL=C sort -k1,1 -k4,4 -u |awk '$2 != 4' >"out_bsf_$PE_reads_name.sam"
+                    echo "99" > map_progress
+                else #FASTQ reads
+                    echo "Doing paired-end FASTQ BSF Mapping"
+                    echo "1" > map_progress
+                    awk 'FNR%4==2 {gsub("C","T",$0);print $0} FNR%4!=2' "$PE_reads1"> "C2T_$PE_reads1_name"
+                    awk 'FNR%4==2 {gsub("G","A",$0);print $0} FNR%4!=2' "$PE_reads1"> "G2A_$PE_reads1_name"
+                    awk 'FNR%4==2 {gsub("C","T",$0);print $0} FNR%4!=2' "$PE_reads2"> "C2T_$PE_reads2_name"
+                    awk 'FNR%4==2 {gsub("G","A",$0);print $0} FNR%4!=2' "$PE_reads2"> "G2A_$PE_reads2_name"
+                    bowtie2 $bt2opt -q -x "1_double_bt2_base_$ref_name" -1 "C2T_$PE_reads1_name" -2 "G2A_$PE_reads2_name" -S "1_out_bt2_C2T_$PE_reads_name.sam"
+                    bowtie2 $bt2opt -q -x "1_double_bt2_base_$ref_name" -1 "G2A_$PE_reads1_name" -2 "C2T_$PE_reads2_name" -S "1_out_bt2_G2A_$PE_reads_name.sam"
+                    echo "50" > map_progress
+                    bowtie2 $bt2opt -q -x "2_double_bt2_base_$ref_name" -1 "C2T_$PE_reads1_name" -2 "G2A_$PE_reads2_name" -S "2_out_bt2_C2T_$PE_reads_name.sam"
+                    bowtie2 $bt2opt -q -x "2_double_bt2_base_$ref_name" -1 "G2A_$PE_reads1_name" -2 "C2T_$PE_reads2_name" -S "2_out_bt2_G2A_$PE_reads_name.sam"
+                    cat "1_out_bt2_C2T_$PE_reads_name.sam" "1_out_bt2_G2A_$PE_reads_name.sam" "2_out_bt2_C2T_$PE_reads_name.sam" "2_out_bt2_G2A_$PE_reads_name.sam" |LC_ALL=C sort -k1,1 -k4,4 -u |awk '$2 != 4' >"out_bsf_$PE_reads_name.sam"
+                    echo "99" > map_progress
+                fi
+                if [ "$F" = "true" ]
+                then
+                    cut -f 1,2 one_line_reads.read|cut -c 2- > "SEQ.tmp"
+                    LC_ALL=C join "SEQ.tmp" "out_bsf_$PE_reads_name.sam" -t $'\t' -a2 > "joined.sam"
+                    awk 'BEGIN {FS=OFS="\t"}{$11=$2;$2="";print}' "joined.sam"|sed 's/\t\t/\t/g'|LC_ALL=C sort -k1,1 -k4,4 -u > "seq_modified.sam"
+                    LCS "$ref" "seq_modified.sam"
+                    mv "modified.seq_modified.sam" "$outfile"
+                else
+                    mv "out_bsf_$PE_reads_name.sam" "$outfile"
+                fi
+                echo "100" > map_progress
+            fi
+    else
+        echo "Error:no reads file."
+        usage
+    fi    
+fi
+
+exit 0
+

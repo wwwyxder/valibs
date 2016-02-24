@@ -1,0 +1,9 @@
+This tool can only run on linux 64bit.
+
+Usage:
+    b2map-bs index -X <ref.fa>             //build bisulfite index
+
+    b2map-bs -X <ref.fa> -U <SE_reads.fq> -O <aln.sam>  //mapping single-end FASTQ bisulfite reads
+    b2map-bs -X <ref.fa> -1 <PE_reads1.fq> -2 <PE_reads2.fq> -O <aln.sam>  //mapping paired-end FASTQ bisulfite reads
+    b2map-bs -X <ref.fa> -U <SE_reads.fq> -O <aln.sam> -A  //mapping single-end FASTA bisulfite reads
+    b2map-bs -X <ref.fa> -1 <PE_reads1.fq> -2 <PE_reads2.fq> -A -O <aln.sam>  //mapping paired-end FASTA bisulfite reads
